@@ -1,9 +1,10 @@
-import { css } from 'lit-element';
+import { css } from 'lit';
 
 export const styles = css`
   :host {
     position: relative;
     display: block;
+    --state-inactive-color: var(--paper-item-icon-color);
   }
   ha-card {
     cursor: pointer;
@@ -46,13 +47,13 @@ export const styles = css`
     top: 50%;
     left: 50%;
     transform: translate(-50%, -50%);
-    z-index: 9999;
   }
   :host(.tooltip:hover) span.tooltiptext {
     opacity: 1;
     transition-delay: 1.5s;
   }
-  ha-icon {
+  :not(ha-state-icon) ha-icon,
+  ha-state-icon {
     display: inline-block;
     margin: auto;
     --mdc-icon-size: 100%;
@@ -74,6 +75,7 @@ export const styles = css`
     white-space: nowrap;
     overflow: hidden;
   }
+
   #overlay {
     align-items: flex-start;
     justify-content: flex-end;
@@ -85,7 +87,6 @@ export const styles = css`
     right: 0;
     top: 0;
     bottom: 0;
-    z-index: 50;
     display: flex;
   }
   #lock {
@@ -171,7 +172,7 @@ export const styles = css`
     position: relative;
   }
 
-  ha-icon#icon {
+  ha-state-icon#icon {
     height: 100%;
     width: 100%;
     max-height: 100%;

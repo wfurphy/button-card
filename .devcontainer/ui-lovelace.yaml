@@ -453,6 +453,8 @@ views:
                   type: entity-button
                   entity: switch.skylight
                   name: Default HASS
+                  show_name: false
+                  show_state: true
               - type: custom:card-modder
                 styles:
                   card:
@@ -460,6 +462,8 @@ views:
                 card:
                   type: 'custom:button-card'
                   entity: switch.skylight
+                  show_state: true
+                  show_name: false
               - type: custom:card-modder
                 styles:
                   card:
@@ -559,7 +563,6 @@ views:
                 layout: icon_name_state
               - type: 'custom:button-card'
                 color_type: label-card
-                color: var(--item-color-main)
                 name: Testing default size
                 styles:
                   card:
@@ -984,6 +987,7 @@ views:
                 name: more-info
                 tap_action:
                   action: more-info
+                  entity: light.test_light
               - type: 'custom:button-card'
                 entity: switch.skylight
                 name: call-service
@@ -992,6 +996,19 @@ views:
                   service: switch.toggle
                   service_data:
                     entity_id: switch.skylight
+              - type: 'custom:button-card'
+                entity: switch.skylight
+                name: call-service
+                tap_action:
+                  action: call-service
+                  service: timer.start
+                  target:
+                    entity_id: timer.laundry
+              - type: 'custom:button-card'
+                entity: switch.skylight
+                name: assist
+                tap_action:
+                  action: assist
               - type: 'custom:button-card'
                 entity: switch.skylight
                 name: none
@@ -1634,7 +1651,7 @@ views:
                 cards:
                   - type: horizontal-stack
                     cards:
-                      - type: entity-button
+                      - type: button-card
                         entity: switch.skylight
                         name: Default
                       - type: 'custom:button-card'
@@ -1953,6 +1970,7 @@ views:
             hold_action:
               action: call-service
               repeat: 500
+              repeat_limit: 2
               service: input_number.increment
               service_data:
                 entity_id: input_number.test
@@ -2725,3 +2743,12 @@ views:
             - color: '#DADADB'
           label:
             - font-size: 6em
+
+      - type: custom:button-card
+        entity: switch.skylight
+        state_display: Default state_display
+        show_state: true
+        state:
+          - value: 'on'
+            state_display: state[].state_display
+          - value: 'off'

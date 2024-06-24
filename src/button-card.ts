@@ -1,35 +1,15 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /* eslint-disable @typescript-eslint/no-non-null-assertion */
-import {
-  LitElement,
-  html,
-  customElement,
-  property,
-  TemplateResult,
-  CSSResult,
-  PropertyValues,
-  queryAsync,
-  eventOptions,
-} from 'lit-element';
+import { LitElement, html, TemplateResult, CSSResult, PropertyValues } from 'lit';
+import { customElement, property, queryAsync, eventOptions } from 'lit/decorators';
+import { ifDefined } from 'lit/directives/if-defined.js';
 import { Ripple } from '@material/mwc-ripple';
 import { RippleHandlers } from '@material/mwc-ripple/ripple-handlers';
 import { styleMap, StyleInfo } from 'lit-html/directives/style-map';
 import { unsafeHTML } from 'lit-html/directives/unsafe-html';
 import { classMap, ClassInfo } from 'lit-html/directives/class-map';
 import { HassEntity } from 'home-assistant-js-websocket';
-import {
-  stateIcon,
-  HomeAssistant,
-  handleClick,
-  getLovelace,
-  timerTimeRemaining,
-  secondsToDuration,
-  durationToSeconds,
-  createThing,
-  fireEvent,
-  DOMAINS_TOGGLE,
-  LovelaceCard,
-} from 'custom-card-helpers';
+import { LovelaceCard } from './types/lovelace';
 import {
   ButtonCardConfig,
   ExternalButtonCardConfig,
@@ -39,7 +19,9 @@ import {
   CustomFieldCard,
   ButtonCardEmbeddedCards,
   ButtonCardEmbeddedCardsConfig,
-} from './types';
+  ColorType,
+  CustomFields,
+} from './types/types';
 import { actionHandler } from './action-handler';
 import {
   computeDomain,
@@ -51,16 +33,54 @@ import {
   getLightColorBasedOnTemperature,
   mergeDeep,
   mergeStatesById,
+  getLovelace,
   getLovelaceCast,
+  secondsToDuration,
+  durationToSeconds,
+  computeStateDomain,
+  stateActive,
+  computeCssVariable,
 } from './helpers';
+import { createThing } from './common/create-thing';
 import { styles } from './styles';
-import { myComputeStateDisplay } from './compute_state_display';
+import { computeStateDisplay } from './common/compute_state_display';
 import copy from 'fast-copy';
 import * as pjson from '../package.json';
 import { deepEqual } from './deep-equal';
+import { stateColorCss } from './common/state_color';
+import {
+  AUTO_COLORS,
+  DEFAULT_COLOR,
+  DOMAINS_TOGGLE,
+  OVERRIDE_CARD_BACKGROUND_COLOR_COLORS,
+  OVERRIDE_CARD_BACKGROUND_COLOR_COLOR_TYPE,
+} from './common/const';
+import { handleAction } from './handle-action';
+import { fireEvent } from './common/fire-event';
+import { HomeAssistant } from './types/homeassistant';
+import { timerTimeRemaining } from './common/timer';
+import {
+  formatDateTime,
+  formatDateTimeNumeric,
+  formatDateTimeWithSeconds,
+  formatShortDateTime,
+  formatShortDateTimeWithYear,
+} from './common/format_date_time';
+import { formatTime, formatTime24h, formatTimeWeekday, formatTimeWithSeconds } from './common/format_time';
+import {
+  formatDate,
+  formatDateMonth,
+  formatDateMonthYear,
+  formatDateNumeric,
+  formatDateShort,
+  formatDateWeekday,
+  formatDateWeekdayDay,
+  formatDateWeekdayShort,
+  formatDateYear,
+} from './common/format_date';
 
 let helpers = (window as any).cardHelpers;
-const helperPromise = new Promise(async (resolve) => {
+const helperPromise = new Promise<void>(async (resolve) => {
   if (helpers) resolve();
   if ((window as any).loadCardHelpers) {
     helpers = await (window as any).loadCardHelpers();
@@ -85,6 +105,7 @@ console.info(
 });
 
 @customElement('button-card')
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 class ButtonCard extends LitElement {
   @property() private _hass?: HomeAssistant;
 
@@ -108,7 +129,11 @@ class ButtonCard extends LitElement {
 
   private _entities: string[] = [];
 
-  private _initial_setup_complete = false;
+  private _initialSetupComplete = false;
+
+  private get _doIHaveEverything(): boolean {
+    return !!this._hass && !!this._config && this.isConnected;
+  }
 
   public set hass(hass: HomeAssistant) {
     this._hass = hass;
@@ -116,8 +141,8 @@ class ButtonCard extends LitElement {
       const el = this._cards[element];
       el.hass = this._hass;
     });
-    if (!this._initial_setup_complete) {
-      this._initConnected();
+    if (!this._initialSetupComplete) {
+      this._finishSetup();
     }
   }
 
@@ -128,19 +153,92 @@ class ButtonCard extends LitElement {
 
   public connectedCallback(): void {
     super.connectedCallback();
-    if (!this._initial_setup_complete) {
-      this._initConnected();
+    if (!this._initialSetupComplete) {
+      this._finishSetup();
     } else {
       this._startTimerCountdown();
     }
   }
 
-  private _initConnected(): void {
-    if (this._hass === undefined) return;
-    if (this._config === undefined) return;
-    if (!this.isConnected) return;
-    this._initial_setup_complete = true;
-    this._startTimerCountdown();
+  private _evaluateVariablesSkipError(stateObj?: HassEntity | undefined) {
+    this._evaledVariables = {};
+    if (this._config?.variables) {
+      const variablesNameOrdered = Object.keys(this._config.variables).sort();
+      variablesNameOrdered.forEach((variable) => {
+        try {
+          this._evaledVariables[variable] = this._objectEvalTemplate(stateObj, this._config!.variables![variable]);
+        } catch (e) {}
+      });
+    }
+  }
+
+  private _finishSetup(): void {
+    if (!this._initialSetupComplete && this._doIHaveEverything) {
+      this._evaluateVariablesSkipError();
+
+      if (this._config!.entity) {
+        const entityEvaled = this._getTemplateOrValue(undefined, this._config!.entity);
+        this._config!.entity = entityEvaled;
+        this._stateObj = this._hass!.states[entityEvaled];
+      }
+
+      this._evaluateVariablesSkipError(this._stateObj);
+
+      if (this._config!.entity && DOMAINS_TOGGLE.has(computeDomain(this._config!.entity))) {
+        this._config = {
+          tap_action: { action: 'toggle' },
+          ...this._config!,
+        };
+      } else if (this._config!.entity) {
+        this._config = {
+          tap_action: { action: 'more-info' },
+          ...this._config!,
+        };
+      } else {
+        this._config = {
+          tap_action: { action: 'none' },
+          ...this._config!,
+        };
+      }
+
+      const jsonConfig = JSON.stringify(this._config);
+      this._entities = [];
+      if (Array.isArray(this._config!.triggers_update)) {
+        this._config!.triggers_update.forEach((entry) => {
+          try {
+            const evaluatedEntry = this._getTemplateOrValue(this._stateObj, entry);
+            if (evaluatedEntry !== undefined && evaluatedEntry !== null && !this._entities.includes(evaluatedEntry)) {
+              this._entities.push(evaluatedEntry);
+            }
+          } catch (e) {}
+        });
+      } else if (typeof this._config!.triggers_update === 'string') {
+        const result = this._getTemplateOrValue(this._stateObj, this._config!.triggers_update);
+        if (result && result !== 'all') {
+          this._entities.push(result);
+        } else {
+          this._config.triggers_update = result;
+        }
+      }
+      if (this._config!.triggers_update !== 'all') {
+        const entitiesRxp = new RegExp(/states\[\s*('|\\")([a-zA-Z0-9_]+\.[a-zA-Z0-9_]+)\1\s*\]/, 'gm');
+        const entitiesRxp2 = new RegExp(/states\[\s*('|\\")([a-zA-Z0-9_]+\.[a-zA-Z0-9_]+)\1\s*\]/, 'm');
+        const matched = jsonConfig.match(entitiesRxp);
+        matched?.forEach((match) => {
+          const res = match.match(entitiesRxp2);
+          if (res && !this._entities.includes(res[2])) this._entities.push(res[2]);
+        });
+      }
+      if (this._config!.entity && !this._entities.includes(this._config!.entity))
+        this._entities.push(this._config!.entity);
+      this._expandTriggerGroups();
+
+      const rxp = new RegExp('\\[\\[\\[.*\\]\\]\\]', 'm');
+      this._hasTemplate = this._config!.triggers_update === 'all' && jsonConfig.match(rxp) ? true : false;
+
+      this._startTimerCountdown();
+      this._initialSetupComplete = true;
+    }
   }
 
   private _startTimerCountdown(): void {
@@ -169,11 +267,18 @@ class ButtonCard extends LitElement {
     if (!this._config || !this._hass) return html``;
     this._stateObj = this._config!.entity ? this._hass!.states[this._config!.entity] : undefined;
     try {
-      this._evaledVariables = this._config!.variables
-        ? this._objectEvalTemplate(this._stateObj, this._config!.variables)
-        : undefined;
+      this._evaledVariables = {};
+      if (this._config?.variables) {
+        const variablesNameOrdered = Object.keys(this._config.variables).sort();
+        variablesNameOrdered.forEach((variable) => {
+          this._evaledVariables[variable] = this._objectEvalTemplate(
+            this._stateObj,
+            this._config!.variables![variable],
+          );
+        });
+      }
       return this._cardHtml();
-    } catch (e) {
+    } catch (e: any) {
       if (e.stack) console.error(e.stack);
       else console.error(e);
       const errorCard = document.createElement('hui-error-card') as LovelaceCard;
@@ -238,7 +343,7 @@ class ButtonCard extends LitElement {
     }
   }
 
-  private _computeTimeDisplay(stateObj: HassEntity): string | undefined {
+  private _computeTimeDisplay(stateObj: HassEntity): string | undefined | null {
     if (!stateObj) {
       return undefined;
     }
@@ -295,10 +400,121 @@ class ButtonCard extends LitElement {
     return retval;
   }
 
+  private _localize(
+    stateObj: HassEntity,
+    state?: string,
+    numeric_precision?: number | 'card',
+    show_units = true,
+    units?: string,
+  ): string {
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    return computeStateDisplay(
+      this._hass!.localize,
+      stateObj,
+      this._hass!.locale,
+      this._hass!.config,
+      this._hass!.entities,
+      {
+        numeric_precision: numeric_precision === 'card' ? this._config?.numeric_precision : numeric_precision,
+        show_units,
+        units,
+      },
+      state,
+    );
+  }
+
+  private _relativeTime(date: string | undefined, capitalize: boolean = false) {
+    if (date) {
+      return html`
+        <ha-relative-time
+          id="relative-time"
+          class="ellipsis"
+          .hass="${this._hass}"
+          .datetime="${date}"
+          .capitalize="${capitalize}"
+        ></ha-relative-time>
+      `;
+    }
+    return '';
+  }
+
+  private _getTemplateHelpers() {
+    return {
+      localize: this._localize.bind(this),
+      // Datetime functions
+      formatDateTime: (datetime) => {
+        return formatDateTime(new Date(datetime), this._hass!.locale, this._hass!.config);
+      },
+      formatShortDateTimeWithYear: (datetime) => {
+        return formatShortDateTimeWithYear(new Date(datetime), this._hass!.locale, this._hass!.config);
+      },
+      formatShortDateTime: (datetime) => {
+        return formatShortDateTime(new Date(datetime), this._hass!.locale, this._hass!.config);
+      },
+      formatDateTimeWithSeconds: (datetime) => {
+        return formatDateTimeWithSeconds(new Date(datetime), this._hass!.locale, this._hass!.config);
+      },
+      formatDateTimeNumeric: (datetime) => {
+        return formatDateTimeNumeric(new Date(datetime), this._hass!.locale, this._hass!.config);
+      },
+      // Time functions
+      relativeTime: this._relativeTime.bind(this),
+      formatTime: (time) => {
+        return formatTime(new Date(time), this._hass!.locale, this._hass!.config);
+      },
+      formatTimeWithSeconds: (time) => {
+        return formatTimeWithSeconds(new Date(time), this._hass!.locale, this._hass!.config);
+      },
+      formatTimeWeekday: (time) => {
+        return formatTimeWeekday(new Date(time), this._hass!.locale, this._hass!.config);
+      },
+      formatTime24h: (time) => {
+        return formatTime24h(new Date(time), this._hass!.locale, this._hass!.config);
+      },
+      // Date functions
+      formatDateWeekdayDay: (date) => {
+        return formatDateWeekdayDay(new Date(date), this._hass!.locale, this._hass!.config);
+      },
+      formatDate: (date) => {
+        return formatDate(new Date(date), this._hass!.locale, this._hass!.config);
+      },
+      formatDateNumeric: (date) => {
+        return formatDateNumeric(new Date(date), this._hass!.locale, this._hass!.config);
+      },
+      formatDateShort: (date) => {
+        return formatDateShort(new Date(date), this._hass!.locale, this._hass!.config);
+      },
+      formatDateMonthYear: (date) => {
+        return formatDateMonthYear(new Date(date), this._hass!.locale, this._hass!.config);
+      },
+      formatDateMonth: (date) => {
+        return formatDateMonth(new Date(date), this._hass!.locale, this._hass!.config);
+      },
+      formatDateYear: (date) => {
+        return formatDateYear(new Date(date), this._hass!.locale, this._hass!.config);
+      },
+      formatDateWeekday: (date) => {
+        return formatDateWeekday(new Date(date), this._hass!.locale, this._hass!.config);
+      },
+      formatDateWeekdayShort: (date) => {
+        return formatDateWeekdayShort(new Date(date), this._hass!.locale, this._hass!.config);
+      },
+    };
+  }
+
   private _evalTemplate(state: HassEntity | undefined, func: any): any {
     /* eslint no-new-func: 0 */
     try {
-      return new Function('states', 'entity', 'user', 'hass', 'variables', 'html', `'use strict'; ${func}`).call(
+      return new Function(
+        'states',
+        'entity',
+        'user',
+        'hass',
+        'variables',
+        'html',
+        `helpers`,
+        `'use strict'; ${func}`,
+      ).call(
         this,
         this._hass!.states,
         state,
@@ -306,8 +522,9 @@ class ButtonCard extends LitElement {
         this._hass,
         this._evaledVariables,
         html,
+        this._getTemplateHelpers(),
       );
-    } catch (e) {
+    } catch (e: any) {
       const funcTrimmed = func.length <= 100 ? func.trim() : `${func.trim().substring(0, 98)}...`;
       e.message = `${e.name}: ${e.message} in '${funcTrimmed}'`;
       e.name = 'ButtonCardJSTemplateError';
@@ -337,47 +554,43 @@ class ButtonCard extends LitElement {
     }
   }
 
-  private _getDefaultColorForState(state: HassEntity): string {
-    switch (state.state) {
-      case 'on':
-        return this._config!.color_on;
-      case 'off':
-        return this._config!.color_off;
-      default:
-        return this._config!.default_color;
+  private _getColorForLightEntity(
+    state: HassEntity | undefined,
+    useTemperature: boolean,
+    cardColorType?: ColorType,
+  ): string {
+    let color: string = DEFAULT_COLOR;
+    if (OVERRIDE_CARD_BACKGROUND_COLOR_COLOR_TYPE.includes(color)) {
+      color = computeCssVariable(OVERRIDE_CARD_BACKGROUND_COLOR_COLORS)!;
     }
-  }
-
-  private _getColorForLightEntity(state: HassEntity | undefined, useTemperature: boolean): string {
-    let color: string = this._config!.default_color;
     if (state) {
-      if (state.state === 'on') {
+      // we have en entity
+      if (stateActive(state)) {
+        // entity is on
         if (state.attributes.rgb_color) {
+          // entity has RGB attributes
           color = `rgb(${state.attributes.rgb_color.join(',')})`;
-          if (state.attributes.brightness) {
-            color = applyBrightnessToColor(color, (state.attributes.brightness + 245) / 5);
-          }
         } else if (
           useTemperature &&
           state.attributes.color_temp &&
           state.attributes.min_mireds &&
           state.attributes.max_mireds
         ) {
+          // entity has color temperature and we want it
           color = getLightColorBasedOnTemperature(
             state.attributes.color_temp,
             state.attributes.min_mireds,
             state.attributes.max_mireds,
           );
-          if (state.attributes.brightness) {
-            color = applyBrightnessToColor(color, (state.attributes.brightness + 245) / 5);
-          }
-        } else if (state.attributes.brightness) {
-          color = applyBrightnessToColor(this._getDefaultColorForState(state), (state.attributes.brightness + 245) / 5);
         } else {
-          color = this._getDefaultColorForState(state);
+          // all the other lights
+          color = stateColorCss(state, state.state, cardColorType) || DEFAULT_COLOR;
+        }
+        if (state.attributes.brightness) {
+          color = applyBrightnessToColor(this, color, (state.attributes.brightness + 245) / 5);
         }
       } else {
-        color = this._getDefaultColorForState(state);
+        color = stateColorCss(state, state.state, cardColorType) || DEFAULT_COLOR;
       }
     }
     return color;
@@ -388,19 +601,25 @@ class ButtonCard extends LitElement {
     let color: undefined | string;
     if (configState?.color) {
       colorValue = configState.color;
-    } else if (this._config!.color !== 'auto' && state?.state === 'off') {
-      colorValue = this._config!.color_off;
     } else if (this._config!.color) {
       colorValue = this._config!.color;
     }
-    if (colorValue == 'auto' || colorValue == 'auto-no-temperature') {
-      color = this._getColorForLightEntity(state, colorValue !== 'auto-no-temperature');
+    if (AUTO_COLORS.includes(colorValue)) {
+      if (!state || (state && computeDomain(state.entity_id) !== 'light')) {
+        colorValue = '';
+      }
+    }
+    if (AUTO_COLORS.includes(colorValue)) {
+      // I'm a light
+      color = this._getColorForLightEntity(state, colorValue !== 'auto-no-temperature', this._config?.color_type);
     } else if (colorValue) {
+      // Color is forced but not auto
       color = colorValue;
     } else if (state) {
-      color = this._getDefaultColorForState(state);
+      // based on state
+      color = stateColorCss(state, state.state, this._config?.color_type) || DEFAULT_COLOR;
     } else {
-      color = this._config!.default_color;
+      color = DEFAULT_COLOR;
     }
     return color;
   }
@@ -415,8 +634,7 @@ class ButtonCard extends LitElement {
     } else if (this._config!.icon) {
       icon = this._config!.icon;
     } else {
-      if (!state) return undefined;
-      icon = stateIcon(state);
+      return undefined;
     }
     return this._getTemplateOrValue(state, icon);
   }
@@ -502,47 +720,44 @@ class ButtonCard extends LitElement {
     return this._getTemplateOrValue(state, name);
   }
 
-  private _buildStateString(stateObj: HassEntity | undefined): string | undefined {
-    let stateString: string | undefined;
+  private _buildStateString(stateObj: HassEntity | undefined): string | undefined | null {
+    let stateString: string | undefined | null;
     if (this._config!.show_state && stateObj && stateObj.state) {
-      const units = this._buildUnits(stateObj);
-      if (units) {
-        stateString = `${stateObj.state} ${units}`;
-      } else if (computeDomain(stateObj.entity_id) === 'timer') {
+      if (computeDomain(stateObj.entity_id) === 'timer') {
         if (stateObj.state === 'idle' || this._timeRemaining === 0) {
-          stateString = myComputeStateDisplay(this._hass!, this._hass!.localize, stateObj, this._hass!.language);
+          stateString = computeStateDisplay(
+            this._hass!.localize,
+            stateObj,
+            this._hass!.locale,
+            this._hass!.config,
+            this._hass!.entities,
+            this._config,
+          );
         } else {
           stateString = this._computeTimeDisplay(stateObj);
           if (stateObj.state === 'paused') {
-            stateString += ` (${myComputeStateDisplay(
-              this._hass!,
+            stateString += ` (${computeStateDisplay(
               this._hass!.localize,
               stateObj,
-              this._hass!.language,
+              this._hass!.locale,
+              this._hass!.config,
+              this._hass!.entities,
+              this._config,
             )})`;
           }
         }
-      } else if (!this._config?.show_units && computeDomain(stateObj.entity_id) === 'sensor') {
-        stateString = stateObj.state;
       } else {
-        stateString = myComputeStateDisplay(this._hass!, this._hass!.localize, stateObj, this._hass!.language);
+        stateString = computeStateDisplay(
+          this._hass!.localize,
+          stateObj,
+          this._hass!.locale,
+          this._hass!.config,
+          this._hass!.entities,
+          this._config,
+        );
       }
     }
     return stateString;
-  }
-
-  private _buildUnits(state: HassEntity | undefined): string | undefined {
-    let units: string | undefined;
-    if (state) {
-      if (this._config!.show_units) {
-        if (state.attributes?.unit_of_measurement && !this._config!.units) {
-          units = state.attributes.unit_of_measurement;
-        } else {
-          units = this._config!.units ? this._config!.units : undefined;
-        }
-      }
-    }
-    return units;
   }
 
   private _buildLastChanged(state: HassEntity | undefined, style: StyleInfo): TemplateResult | undefined {
@@ -584,7 +799,11 @@ class ButtonCard extends LitElement {
         if (!(value as CustomFieldCard).card) {
           fields[key] = this._getTemplateOrValue(state, value);
         } else {
-          cards[key] = this._objectEvalTemplate(state, (value as CustomFieldCard).card);
+          if ((value as CustomFieldCard).do_not_eval) {
+            cards[key] = copy((value as CustomFieldCard).card);
+          } else {
+            cards[key] = this._objectEvalTemplate(state, (value as CustomFieldCard).card);
+          }
         }
       });
     }
@@ -594,7 +813,11 @@ class ButtonCard extends LitElement {
         if (!(value as CustomFieldCard)!.card) {
           fields[key] = this._getTemplateOrValue(state, value);
         } else {
-          cards[key] = this._objectEvalTemplate(state, (value as CustomFieldCard).card);
+          if ((value as CustomFieldCard).do_not_eval) {
+            cards[key] = copy((value as CustomFieldCard).card);
+          } else {
+            cards[key] = this._objectEvalTemplate(state, (value as CustomFieldCard).card);
+          }
         }
       });
     }
@@ -606,9 +829,7 @@ class ButtonCard extends LitElement {
         };
         result = html`
           ${result}
-          <div id=${key} class="ellipsis" style=${styleMap(customStyle)}>
-            ${fields[key] && (fields[key] as any).type === 'html' ? fields[key] : unsafeHTML(fields[key])}
-          </div>
+          <div id=${key} class="ellipsis" style=${styleMap(customStyle)}>${this._unsafeHTMLorNot(fields[key])}</div>
         `;
       }
     });
@@ -648,17 +869,26 @@ class ButtonCard extends LitElement {
     return result;
   }
 
-  private _isClickable(state: HassEntity | undefined): boolean {
-    let clickable = true;
+  private _hasChildCards(customFields: CustomFields | undefined): boolean {
+    if (!customFields) return false;
+    return Object.keys(customFields).some((key) => {
+      const value = customFields![key];
+      if ((value as CustomFieldCard)!.card) {
+        return true;
+      }
+      return false;
+    });
+  }
+
+  private _isClickable(state: HassEntity | undefined, configState: StateConfig | undefined): boolean {
     const tap_action = this._getTemplateOrValue(state, this._config!.tap_action!.action);
     const hold_action = this._getTemplateOrValue(state, this._config!.hold_action!.action);
     const double_tap_action = this._getTemplateOrValue(state, this._config!.double_tap_action!.action);
-    if (tap_action != 'none' || hold_action != 'none' || double_tap_action != 'none') {
-      clickable = true;
-    } else {
-      clickable = false;
-    }
-    return clickable;
+    const hasChildCards =
+      this._hasChildCards(this._config!.custom_fields) ||
+      !!(configState && this._hasChildCards(configState.custom_fields));
+
+    return tap_action != 'none' || hold_action != 'none' || double_tap_action != 'none' || hasChildCards;
   }
 
   private _rotate(configState: StateConfig | undefined): boolean {
@@ -669,6 +899,7 @@ class ButtonCard extends LitElement {
     const blankCardStyle = {
       background: 'none',
       'box-shadow': 'none',
+      'border-style': 'none',
       ...cardStyle,
     };
     return html`
@@ -680,7 +911,20 @@ class ButtonCard extends LitElement {
 
   private _cardHtml(): TemplateResult {
     const configState = this._getMatchingConfigState(this._stateObj);
-    const color = this._buildCssColorAttribute(this._stateObj, configState);
+    let color: string = 'var(--state-inactive-color)';
+    if (!!configState?.color && !AUTO_COLORS.includes(configState.color)) {
+      color = configState.color;
+    } else if (!!this._config?.color && !AUTO_COLORS.includes(this._config.color)) {
+      if (this._stateObj) {
+        if (stateActive(this._stateObj)) {
+          color = this._config?.color || color;
+        }
+      } else {
+        color = this._config.color;
+      }
+    } else {
+      color = this._buildCssColorAttribute(this._stateObj, configState);
+    }
     let buttonColor = color;
     let cardStyle: any = {};
     let lockStyle: any = {};
@@ -690,7 +934,7 @@ class ButtonCard extends LitElement {
     const tooltipStyleFromConfig = this._buildStyleGeneric(this._stateObj, configState, 'tooltip');
     const classList: ClassInfo = {
       'button-card-main': true,
-      disabled: !this._isClickable(this._stateObj),
+      disabled: !this._isClickable(this._stateObj, configState),
     };
     if (this._config?.tooltip) {
       this.classList.add('tooltip');
@@ -704,7 +948,7 @@ class ButtonCard extends LitElement {
         return this._blankCardColoredHtml(configCardStyle);
       case 'card':
       case 'label-card': {
-        const fontColor = getFontColorBasedOnBackgroundColor(color);
+        const fontColor = getFontColorBasedOnBackgroundColor(this, color);
         cardStyle.color = fontColor;
         lockStyle.color = fontColor;
         cardStyle['background-color'] = color;
@@ -755,14 +999,15 @@ class ButtonCard extends LitElement {
             hasDoubleClick: this._config!.double_tap_action!.action !== 'none',
             hasHold: this._config!.hold_action!.action !== 'none',
             repeat: this._config!.hold_action!.repeat,
+            repeatLimit: this._config!.hold_action!.repeat_limit,
           })}
           .config="${this._config}"
         >
           ${this._buttonContent(this._stateObj, configState, buttonColor)}
           <mwc-ripple id="ripple"></mwc-ripple>
         </ha-card>
+        ${this._getLock(lockStyle)}
       </div>
-      ${this._getLock(lockStyle)}
       ${this._config?.tooltip
         ? html`
             <span class="tooltiptext" style=${styleMap(tooltipStyleFromConfig)}>
@@ -799,10 +1044,9 @@ class ButtonCard extends LitElement {
     color: string,
   ): TemplateResult {
     const name = this._buildName(state, configState);
+    const stateDisplayActual = configState?.state_display || this._config!.state_display || undefined;
     const stateDisplay =
-      this._config!.show_state && this._config!.state_display
-        ? this._getTemplateOrValue(state, this._config!.state_display)
-        : undefined;
+      this._config!.show_state && stateDisplayActual ? this._getTemplateOrValue(state, stateDisplayActual) : undefined;
     const stateString = stateDisplay ? stateDisplay : this._buildStateString(state);
     const nameStateString = buildNameStateConcat(name, stateString);
 
@@ -812,6 +1056,14 @@ class ButtonCard extends LitElement {
         return this._gridHtml(state, configState, this._config!.layout, color, nameStateString, undefined);
       default:
         return this._gridHtml(state, configState, this._config!.layout, color, name, stateString);
+    }
+  }
+
+  private _unsafeHTMLorNot(input: any): any {
+    if (input.strings || input.values) {
+      return input;
+    } else {
+      return unsafeHTML(`${input}`);
     }
   }
 
@@ -842,21 +1094,21 @@ class ButtonCard extends LitElement {
         ${name
           ? html`
               <div id="name" class="ellipsis" style=${styleMap(nameStyleFromConfig)}>
-                ${(name as any).type === 'html' ? name : unsafeHTML(name)}
+                ${this._unsafeHTMLorNot(name)}
               </div>
             `
           : ''}
         ${stateString
           ? html`
               <div id="state" class="ellipsis" style=${styleMap(stateStyleFromConfig)}>
-                ${(stateString as any).type === 'html' ? stateString : unsafeHTML(stateString)}
+                ${this._unsafeHTMLorNot(stateString)}
               </div>
             `
           : ''}
         ${label && !lastChangedTemplate
           ? html`
               <div id="label" class="ellipsis" style=${styleMap(labelStyleFromConfig)}>
-                ${(label as any).type === 'html' ? label : unsafeHTML(label)}
+                ${this._unsafeHTMLorNot(label)}
               </div>
             `
           : ''}
@@ -880,6 +1132,7 @@ class ButtonCard extends LitElement {
     const haIconStyle: StyleInfo = {
       color,
       width: this._config!.size,
+      '--ha-icon-display': haCardStyleFromConfig.height ? 'inline' : undefined,
       position: !this._config!.aspect_ratio && !haCardStyleFromConfig.height ? 'relative' : 'absolute',
       ...haIconStyleFromConfig,
     };
@@ -888,18 +1141,28 @@ class ButtonCard extends LitElement {
       ...entityPictureStyleFromConfig,
     };
     const liveStream = this._buildLiveStream(entityPictureStyle);
+    const shouldShowIcon = this._config!.show_icon && (icon || state);
 
-    if (icon || entityPicture) {
+    if (shouldShowIcon || entityPicture) {
+      let domain: string | undefined = undefined;
+      if (state) {
+        domain = computeStateDomain(state);
+      }
       return html`
         <div id="img-cell" style=${styleMap(imgCellStyleFromConfig)}>
-          ${icon && !entityPicture && !liveStream
+          ${shouldShowIcon && !entityPicture && !liveStream
             ? html`
-                <ha-icon
+                <ha-state-icon
+                  .state=${state}
+                  .stateObj=${state}
+                  .hass=${this._hass}
+                  ?data-domain=${domain}
+                  data-state=${ifDefined(state?.state)}
                   style=${styleMap(haIconStyle)}
                   .icon="${icon}"
                   id="icon"
                   ?rotating=${this._rotate(configState)}
-                ></ha-icon>
+                ></ha-state-icon>
               `
             : ''}
           ${liveStream ? liveStream : ''}
@@ -958,6 +1221,9 @@ class ButtonCard extends LitElement {
     if (!config) {
       throw new Error('Invalid configuration');
     }
+    if (this._initialSetupComplete) {
+      this._initialSetupComplete = false;
+    }
 
     this._cards = {};
     this._cardsConfig = {};
@@ -981,9 +1247,6 @@ class ButtonCard extends LitElement {
       show_live_stream: false,
       card_size: 3,
       ...template,
-      default_color: 'DUMMY',
-      color_off: 'DUMMY',
-      color_on: 'DUMMY',
       lock: {
         enabled: false,
         duration: 5,
@@ -991,48 +1254,9 @@ class ButtonCard extends LitElement {
         ...template.lock,
       },
     };
-    if (this._config!.entity && DOMAINS_TOGGLE.has(computeDomain(this._config!.entity))) {
-      this._config = {
-        tap_action: { action: 'toggle' },
-        ...this._config,
-      };
-    } else {
-      this._config = {
-        tap_action: { action: 'more-info' },
-        ...this._config,
-      };
-    }
-    this._config!.default_color = 'var(--primary-text-color)';
-    if (this._config!.color_type !== 'icon') {
-      this._config!.color_off = 'var(--card-background-color)';
-    } else {
-      this._config!.color_off = 'var(--paper-item-icon-color)';
-    }
-    this._config!.color_on = 'var(--paper-item-icon-active-color)';
 
-    const jsonConfig = JSON.stringify(this._config);
-    this._entities = [];
-    if (Array.isArray(this._config.triggers_update)) {
-      this._entities = [...this._config.triggers_update];
-    } else if (typeof this._config.triggers_update === 'string' && this._config.triggers_update !== 'all') {
-      this._entities.push(this._config.triggers_update);
-    }
-    if (this._config.triggers_update !== 'all') {
-      const entitiesRxp = new RegExp(/states\[\s*('|\\")([a-zA-Z0-9_]+\.[a-zA-Z0-9_]+)\1\s*\]/, 'gm');
-      const entitiesRxp2 = new RegExp(/states\[\s*('|\\")([a-zA-Z0-9_]+\.[a-zA-Z0-9_]+)\1\s*\]/, 'm');
-      const matched = jsonConfig.match(entitiesRxp);
-      matched?.forEach((match) => {
-        const res = match.match(entitiesRxp2);
-        if (res && !this._entities.includes(res[2])) this._entities.push(res[2]);
-      });
-    }
-    if (this._config.entity && !this._entities.includes(this._config.entity)) this._entities.push(this._config.entity);
-    this._expandTriggerGroups();
-
-    const rxp = new RegExp('\\[\\[\\[.*\\]\\]\\]', 'm');
-    this._hasTemplate = this._config.triggers_update === 'all' && jsonConfig.match(rxp) ? true : false;
-    if (!this._initial_setup_complete) {
-      this._initConnected();
+    if (!this._initialSetupComplete) {
+      this._finishSetup();
     }
   }
 
@@ -1040,7 +1264,7 @@ class ButtonCard extends LitElement {
     if (entityList) {
       entityList.forEach((childEntity) => {
         if (this._hass?.states[childEntity]) {
-          if (computeDomain(childEntity) === 'group' && this._hass.states[childEntity].attributes?.entity_id) {
+          if (this._hass.states[childEntity].attributes?.entity_id) {
             this._loopGroup(this._hass.states[childEntity].attributes.entity_id);
           } else {
             if (!this._entities.includes(childEntity)) {
@@ -1055,7 +1279,7 @@ class ButtonCard extends LitElement {
   private _expandTriggerGroups(): void {
     if (this._hass && this._config?.group_expand && this._entities) {
       this._entities.forEach((entity) => {
-        if (computeDomain(entity) === 'group') {
+        if (this._hass?.states[entity]?.attributes?.entity_id) {
           this._loopGroup(this._hass?.states[entity].attributes?.entity_id);
         }
       });
@@ -1084,10 +1308,20 @@ class ButtonCard extends LitElement {
       });
       return configEval;
     };
+    if (configDuplicate[action]?.service_data?.entity_id === 'entity') {
+      configDuplicate[action].service_data.entity_id = config.entity;
+    }
+    if (configDuplicate[action]?.data?.entity_id === 'entity') {
+      configDuplicate[action].data.entity_id = config.entity;
+    }
     configDuplicate[action] = __evalObject(configDuplicate[action]);
     if (!configDuplicate[action].confirmation && configDuplicate.confirmation) {
       configDuplicate[action].confirmation = __evalObject(configDuplicate.confirmation);
     }
+    if (configDuplicate[action]?.entity) {
+      configDuplicate.entity = configDuplicate[action].entity;
+    }
+
     return configDuplicate;
   }
 
@@ -1099,55 +1333,37 @@ class ButtonCard extends LitElement {
   // backward compatibility
   @eventOptions({ passive: true })
   private handleRippleActivate(evt?: Event): void {
-    this._ripple.then((r) => r && r.startPress && this._rippleHandlers.startPress(evt));
+    this._ripple.then((r) => r && typeof r.startPress === 'function' && this._rippleHandlers.startPress(evt));
   }
 
   private handleRippleDeactivate(): void {
-    this._ripple.then((r) => r && r.endPress && this._rippleHandlers.endPress());
+    this._ripple.then((r) => r && typeof r.endPress === 'function' && this._rippleHandlers.endPress());
   }
 
   private handleRippleFocus(): void {
-    this._ripple.then((r) => r && r.startFocus && this._rippleHandlers.startFocus());
+    this._ripple.then((r) => r && typeof r.startFocus === 'function' && this._rippleHandlers.startFocus());
   }
 
   private handleRippleBlur(): void {
-    this._ripple.then((r) => r && r.endFocus && this._rippleHandlers.endFocus());
+    this._ripple.then((r) => r && typeof r.endFocus === 'function' && this._rippleHandlers.endFocus());
   }
 
   private _handleAction(ev: any): void {
     if (ev.detail?.action) {
       switch (ev.detail.action) {
         case 'tap':
-          this._handleTap();
-          break;
         case 'hold':
-          this._handleHold();
-          break;
         case 'double_tap':
-          this._handleDblTap();
+          const config = this._config;
+          if (!config) return;
+          const action = ev.detail.action;
+          const localAction = this._evalActions(config, `${action}_action`);
+          handleAction(this, this._hass!, localAction, action);
           break;
         default:
           break;
       }
     }
-  }
-
-  private _handleTap(): void {
-    const config = this._config;
-    if (!config) return;
-    handleClick(this, this._hass!, this._evalActions(config, 'tap_action'), false, false);
-  }
-
-  private _handleHold(): void {
-    const config = this._config;
-    if (!config) return;
-    handleClick(this, this._hass!, this._evalActions(config, 'hold_action'), true, false);
-  }
-
-  private _handleDblTap(): void {
-    const config = this._config;
-    if (!config) return;
-    handleClick(this, this._hass!, this._evalActions(config, 'double_tap_action'), false, true);
   }
 
   private _handleUnlockType(ev): void {
@@ -1162,12 +1378,12 @@ class ButtonCard extends LitElement {
     const lock = this.shadowRoot!.getElementById('lock') as LitElement;
     if (!lock) return;
     if (this._config!.lock!.exemptions) {
-      if (!this._hass!.user.name || !this._hass!.user.id) return;
+      if (!this._hass!.user?.name || !this._hass!.user.id) return;
       let matched = false;
       this._config!.lock!.exemptions.forEach((e) => {
         if (
-          (!matched && (e as ExemptionUserConfig).user === this._hass!.user.id) ||
-          (e as ExemptionUsernameConfig).username === this._hass!.user.name
+          (!matched && (e as ExemptionUserConfig).user === this._hass!.user?.id) ||
+          (e as ExemptionUsernameConfig).username === this._hass!.user?.name
         ) {
           matched = true;
         }
