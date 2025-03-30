@@ -1,10 +1,13 @@
-import { directive, PropertyPart } from 'lit-html';
+import { noChange } from 'lit-html';
 // import '@material/mwc-ripple';
 // tslint:disable-next-line
 import { Ripple } from '@material/mwc-ripple';
-import { myFireEvent } from './my-fire-event';
+import { fireEvent } from './common/fire-event';
 import { deepEqual } from './deep-equal';
+import { AttributePart, Directive, DirectiveParameters, directive } from 'lit-html/directive';
 
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore
 const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0 || navigator.msMaxTouchPoints > 0;
 
 interface ActionHandler extends HTMLElement {
@@ -21,6 +24,7 @@ export interface ActionHandlerOptions {
   hasDoubleClick?: boolean;
   disabled?: boolean;
   repeat?: number;
+  repeatLimit?: number;
 }
 
 interface ActionHandlerElement extends HTMLElement {
@@ -58,6 +62,8 @@ class ActionHandler extends HTMLElement implements ActionHandler {
 
   private isRepeating = false;
 
+  private repeatCount = 0;
+
   constructor() {
     super();
     this.ripple = document.createElement('mwc-ripple');
@@ -65,7 +71,7 @@ class ActionHandler extends HTMLElement implements ActionHandler {
 
   public connectedCallback(): void {
     Object.assign(this.style, {
-      position: 'absolute',
+      position: 'fixed',
       width: isTouch ? '100px' : '50px',
       height: isTouch ? '100px' : '50px',
       transform: 'translate(-50%, -50%)',
@@ -136,11 +142,11 @@ class ActionHandler extends HTMLElement implements ActionHandler {
       let x;
       let y;
       if ((ev as TouchEvent).touches) {
-        x = (ev as TouchEvent).touches[0].pageX;
-        y = (ev as TouchEvent).touches[0].pageY;
+        x = (ev as TouchEvent).touches[0].clientX;
+        y = (ev as TouchEvent).touches[0].clientY;
       } else {
-        x = (ev as MouseEvent).pageX;
-        y = (ev as MouseEvent).pageY;
+        x = (ev as MouseEvent).clientX;
+        y = (ev as MouseEvent).clientY;
       }
 
       if (options.hasHold) {
@@ -149,9 +155,15 @@ class ActionHandler extends HTMLElement implements ActionHandler {
           this.startAnimation(x, y);
           this.held = true;
           if (options.repeat && !this.isRepeating) {
+            this.repeatCount = 0;
             this.isRepeating = true;
             this.repeatTimeout = setInterval(() => {
-              myFireEvent(element, 'action', { action: 'hold' });
+              fireEvent(element, 'action', { action: 'hold' });
+              this.repeatCount++;
+              if (this.repeatTimeout && options.repeatLimit && this.repeatCount >= options.repeatLimit) {
+                clearInterval(this.repeatTimeout);
+                this.isRepeating = false;
+              }
             }, options.repeat);
           }
         }, this.holdTime);
@@ -183,21 +195,21 @@ class ActionHandler extends HTMLElement implements ActionHandler {
       }
       if (options.hasHold && this.held) {
         if (!options.repeat) {
-          myFireEvent(target, 'action', { action: 'hold' });
+          fireEvent(target, 'action', { action: 'hold' });
         }
       } else if (options.hasDoubleClick) {
         if ((ev.type === 'click' && (ev as MouseEvent).detail < 2) || !this.dblClickTimeout) {
           this.dblClickTimeout = window.setTimeout(() => {
             this.dblClickTimeout = undefined;
-            myFireEvent(target, 'action', { action: 'tap' });
+            fireEvent(target, 'action', { action: 'tap' });
           }, 250);
         } else {
           clearTimeout(this.dblClickTimeout);
           this.dblClickTimeout = undefined;
-          myFireEvent(target, 'action', { action: 'double_tap' });
+          fireEvent(target, 'action', { action: 'double_tap' });
         }
       } else {
-        myFireEvent(target, 'action', { action: 'tap' });
+        fireEvent(target, 'action', { action: 'tap' });
       }
     };
 
@@ -254,14 +266,21 @@ const getActionHandler = (): ActionHandler => {
   return actionhandler as ActionHandler;
 };
 
-export const actionHandlerBind = (element: ActionHandlerElement, options: ActionHandlerOptions): void => {
+export const actionHandlerBind = (element: ActionHandlerElement, options?: ActionHandlerOptions) => {
   const actionhandler: ActionHandler = getActionHandler();
   if (!actionhandler) {
     return;
   }
   actionhandler.bind(element, options);
 };
+export const actionHandler = directive(
+  class extends Directive {
+    update(part: AttributePart, [options]: DirectiveParameters<this>) {
+      actionHandlerBind(part.element as ActionHandlerElement, options);
+      return noChange;
+    }
 
-export const actionHandler = directive((options: ActionHandlerOptions = {}) => (part: PropertyPart): void => {
-  actionHandlerBind(part.committer.element as ActionHandlerElement, options);
-});
+    // eslint-disable-next-line @typescript-eslint/no-empty-function, @typescript-eslint/no-unused-vars
+    render(_options?: ActionHandlerOptions) {}
+  },
+);

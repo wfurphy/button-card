@@ -1,4 +1,6 @@
-import { ActionConfig, LovelaceCardConfig, LovelaceCard } from 'custom-card-helpers';
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import { LovelaceCardConfig, LovelaceCard } from './lovelace';
+import { HassServiceTarget } from 'home-assistant-js-websocket';
 
 export interface ButtonCardConfig {
   template?: string | string[];
@@ -8,7 +10,7 @@ export interface ButtonCardConfig {
   entity?: string;
   name?: string;
   icon?: string;
-  color_type: 'icon' | 'card' | 'label-card' | 'blank-card';
+  color_type: ColorType;
   color?: 'auto' | 'auto-no-temperature' | string;
   size: string;
   aspect_ratio?: string;
@@ -25,6 +27,7 @@ export interface ButtonCardConfig {
   show_label?: boolean;
   show_live_stream?: boolean;
   label?: string;
+  numeric_precision?: number;
   entity_picture?: string;
   units?: string;
   state_display?: string;
@@ -33,9 +36,6 @@ export interface ButtonCardConfig {
   confirmation?: string;
   layout: Layout;
   entity_picture_style?: CssStyleConfig[];
-  default_color: string;
-  color_on: string;
-  color_off: string;
   custom_fields?: CustomFields;
   variables?: Variables;
   extra_styles?: string;
@@ -92,6 +92,8 @@ export type Layout =
   | 'icon_state_name2nd'
   | 'icon_label';
 
+export type ColorType = 'icon' | 'card' | 'label-card' | 'blank-card';
+
 export interface LockConfig {
   enabled: boolean;
   duration: number;
@@ -120,6 +122,7 @@ export interface StateConfig {
   spin?: boolean;
   label?: string;
   custom_fields?: CustomFields;
+  state_display?: string;
 }
 
 export interface StylesConfig {
@@ -150,6 +153,7 @@ export interface CustomFields {
 
 export interface CustomFieldCard {
   card: LovelaceCardConfig;
+  do_not_eval?: boolean;
 }
 
 export interface Variables {
@@ -163,3 +167,72 @@ export interface ButtonCardEmbeddedCards {
 export interface ButtonCardEmbeddedCardsConfig {
   [key: string]: string | undefined;
 }
+
+export interface ToggleActionConfig extends BaseActionConfig {
+  action: 'toggle';
+}
+
+export interface CallServiceActionConfig extends BaseActionConfig {
+  action: 'call-service';
+  service: string;
+  target?: HassServiceTarget;
+  // "service_data" is kept for backwards compatibility. Replaced by "data".
+  service_data?: Record<string, unknown>;
+  data?: Record<string, unknown>;
+}
+
+export interface NavigateActionConfig extends BaseActionConfig {
+  action: 'navigate';
+  navigation_path: string;
+}
+
+export interface UrlActionConfig extends BaseActionConfig {
+  action: 'url';
+  url_path: string;
+}
+
+export interface MoreInfoActionConfig extends BaseActionConfig {
+  action: 'more-info';
+}
+
+export interface NoActionConfig extends BaseActionConfig {
+  action: 'none';
+}
+
+export interface CustomActionConfig extends BaseActionConfig {
+  action: 'fire-dom-event';
+}
+
+export interface AssistActionConfig extends BaseActionConfig {
+  action: 'assist';
+  pipeline_id?: string;
+  start_listening?: boolean;
+}
+
+export interface BaseActionConfig {
+  action: string;
+  confirmation?: ConfirmationRestrictionConfig;
+  repeat?: number;
+  repeat_limit?: number;
+}
+
+export interface ConfirmationRestrictionConfig {
+  text?: string;
+  exemptions?: RestrictionConfig[];
+}
+
+export interface RestrictionConfig {
+  user: string;
+}
+
+export type ActionConfig =
+  | ToggleActionConfig
+  | CallServiceActionConfig
+  | NavigateActionConfig
+  | UrlActionConfig
+  | MoreInfoActionConfig
+  | AssistActionConfig
+  | NoActionConfig
+  | CustomActionConfig;
+
+export type Constructor<T = any> = new (...args: any[]) => T;
